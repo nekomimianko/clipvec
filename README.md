@@ -51,6 +51,12 @@ lid = doc.add_vector_layer("from python")
 pts = [Point(100 + i * 8, 300, pressure=i / 100) for i in range(101)]
 doc.set_strokes(lid, [Stroke(pts, color=(20, 20, 20), radius=6, brush_id=doc.default_brush_id())])
 doc.save("out.clip")
+
+# ラスターレイヤーの追加も可能（RGBA 画像をタイル化して同梱する）
+import numpy as np
+rgba = np.zeros((1080, 1920, 4), np.uint8)   # 塗りたい画素に (R, G, B, A)
+rid = doc.add_raster_layer("塗り", rgba)       # 既定では最下層に入る
+doc.save("out.clip")
 ```
 
 ## テストとツール

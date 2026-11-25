@@ -16,7 +16,7 @@ import uuid
 from dataclasses import dataclass
 
 from . import brush as brushmod
-from . import schema, vector
+from . import raster, schema, vector
 from .container import ClipFile, as_bytes
 
 TEMPLATE = os.path.join(os.path.dirname(__file__), "templates", "empty_vector.clip")
@@ -287,6 +287,124 @@ class ClipDocument:
         parent = self._parent_of(ref)
         self._layers[new_layer] = VectorLayer(new_layer, name, None, None, [], parent=parent)
         self._dirty_layers.add(new_layer)
+        return new_layer
+
+    def add_raster_layer(self, name: str, rgba, below: int | None = None) -> int:
+        """Create a raster (bitmap) layer holding `rgba` (uint8 array of
+        shape (canvas_height, canvas_width, 4), RGBA), with a full
+        mipmap chain and thumbnail encoded as real tiled offscreens.
+        Placed directly below `below` (default: the bottom-most
+        non-folder layer, so the new layer becomes the bottom one).
+        Returns the new Layer.MainId."""
+        import numpy as np
+
+        canvas = self.canvas
+        W, H = int(canvas["width"]), int(canvas["height"])
+        rgba = np.asarray(rgba, dtype=np.uint8)
+        if rgba.shape != (H, W, 4):
+            raise ValueError(f"rgba shape {rgba.shape} != canvas {(H, W, 4)}")
+        con = self.con
+        tree = list(self.layer_tree())
+        template_id = next(r["MainId"] for _, r, _ in tree if not r["LayerFolder"])
+        canvas_id = con.execute("select CanvasId from Layer where MainId=?",
+                                (template_id,)).fetchone()[0]
+        new_layer = self._alloc("Layer")
+
+        # mipmap scales, following the template layer's chain
+        base = con.execute(
+            "select BaseMipmapInfo from Mipmap where MainId="
+            "(select LayerRenderMipmap from Layer where MainId=?)",
+            (template_id,)).fetchone()[0]
+        scales = []
+        cur = base
+        while cur:
+            s, nxt = con.execute("select ThisScale, NextIndex from MipmapInfo where MainId=?",
+                                 (cur,)).fetchone()
+            scales.append(s)
+            cur = nxt
+
+        def add_offscreen(img) -> int:
+            attr, body = raster.encode_offscreen(img)
+            ext = new_external_id()
+            self._add_external(ext, body)
+            nid = self._alloc("Offscreen")
+            self._insert("Offscreen", {"MainId": nid, "CanvasId": canvas_id,
+                                        "LayerId": new_layer, "Attribute": attr,
+                                        "BlockData": ext})
+            return nid
+
+        off_by_scale = {}
+        img = rgba
+        for i, s in enumerate(scales):
+            if i:
+                img = raster.halve(img)
+            if img.shape != (max(1, math.ceil(H * s / 100)), max(1, math.ceil(W * s / 100)), 4):
+                raise ValueError(f"mipmap size mismatch at scale {s}")
+            off_by_scale[s] = add_offscreen(img)
+
+        # thumbnail: content halved to fit 512x512, centred on transparent
+        timg = rgba
+        while max(timg.shape[:2]) > 512:
+            timg = raster.halve(timg)
+        thumb = np.zeros((512, 512, 4), np.uint8)
+        y0 = (512 - timg.shape[0]) // 2
+        x0 = (512 - timg.shape[1]) // 2
+        thumb[y0:y0 + timg.shape[0], x0:x0 + timg.shape[1]] = timg
+        thumb_off = add_offscreen(thumb)
+
+        mi_rows = [dict(zip(self._cols("MipmapInfo"), r)) for r in
+                   con.execute("select * from MipmapInfo where LayerId=? order by MainId",
+                               (template_id,)).fetchall()]
+        mi_map = {d["MainId"]: self._alloc("MipmapInfo") for d in mi_rows}
+        for d in mi_rows:
+            d.update(MainId=mi_map[d["MainId"]], LayerId=new_layer,
+                     Offscreen=off_by_scale.get(d["ThisScale"], 0),
+                     NextIndex=mi_map.get(d["NextIndex"], 0))
+            self._insert("MipmapInfo", d)
+        mm_new = 0
+        for row in con.execute("select * from Mipmap where LayerId=?", (template_id,)).fetchall():
+            d = dict(zip(self._cols("Mipmap"), row))
+            mm_new = self._alloc("Mipmap")
+            d.update(MainId=mm_new, LayerId=new_layer,
+                     BaseMipmapInfo=mi_map.get(d["BaseMipmapInfo"], 0))
+            self._insert("Mipmap", d)
+        th_new = 0
+        for row in con.execute("select * from LayerThumbnail where LayerId=?", (template_id,)).fetchall():
+            d = dict(zip(self._cols("LayerThumbnail"), row))
+            th_new = self._alloc("LayerThumbnail")
+            d.update(MainId=th_new, LayerId=new_layer, ThumbnailOffscreen=thumb_off)
+            if "ThumbnailCanvasWidth" in d:
+                d["ThumbnailCanvasWidth"] = W
+            if "ThumbnailCanvasHeight" in d:
+                d["ThumbnailCanvasHeight"] = H
+            self._insert("LayerThumbnail", d)
+
+        d = dict(zip(self._cols("Layer"),
+                     con.execute("select * from Layer where MainId=?", (template_id,)).fetchone()))
+        d.update(MainId=new_layer, LayerName=name, LayerType=1, LayerSelect=0,
+                 LayerUuid=_csp_uuid(), LayerFirstChildIndex=0,
+                 LayerRenderMipmap=mm_new, LayerRenderThumbnail=th_new,
+                 LayerLayerMaskMipmap=0, LayerLayerMaskThumbnail=0)
+        for k in ("DrawToRenderOffscreenType", "VectorNormalStrokeIndex",
+                  "VectorNormalFillIndex", "VectorNormalBalloonIndex",
+                  "VectorNormalType", "MixSubColorForEveryPlot"):
+            if k in d:
+                d[k] = None
+        # splice into the sibling chain directly below `below`
+        if below is None:
+            below = template_id
+        # find the predecessor BEFORE inserting (afterwards the new row
+        # itself would match the LayerNextIndex search)
+        pred = con.execute("select MainId from Layer where LayerNextIndex=?",
+                           (below,)).fetchone()
+        d["LayerNextIndex"] = below
+        self._insert("Layer", d)
+        if pred:
+            con.execute("update Layer set LayerNextIndex=? where MainId=?",
+                        (new_layer, pred[0]))
+        else:
+            con.execute("update Layer set LayerFirstChildIndex=? where LayerFirstChildIndex=?",
+                        (new_layer, below))
         return new_layer
 
     def _top_sibling(self, layer_id: int) -> int:

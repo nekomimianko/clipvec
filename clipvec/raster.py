@@ -86,3 +86,95 @@ def layer_render(clip, db, layer_id: int) -> np.ndarray | None:
     off = db.q("select Offscreen from MipmapInfo where MainId=?", (mm,))[0][0]
     row = db.q("select Attribute, BlockData from Offscreen where MainId=?", (off,))[0]
     return decode_offscreen(row["Attribute"], clip.external_body(row["BlockData"]))
+
+
+# ------------------------------------------------------------- encoding
+# Inverse of the decoder above, following docs/CLIP_FORMAT_SPEC.md §6.
+
+def _section(name: str, data: bytes) -> bytes:
+    return struct.pack(">I", len(name)) + name.encode("utf-16-be") + data
+
+
+def make_attribute(w: int, h: int, block_sizes: list[int]) -> bytes:
+    """Build an Offscreen.Attribute BLOB for a w x h image whose tiles
+    have the given BlockData record lengths."""
+    gw = (w + 255) // 256
+    gh = (h + 255) // 256
+    param = struct.pack(">20I", w, h, gw, gh, 33, 1, 4, 5, 65536, 4, 1024,
+                        1, 256, 65536, 256, 256, 8, 8, 0, 0)
+    init = struct.pack(">5I", 20, 0, 0, 0, 4)
+    bsz = struct.pack(">3I", 12, len(block_sizes), 4) + b"".join(
+        struct.pack(">I", s) for s in block_sizes)
+    p = _section("Parameter", param)
+    i = _section("InitColor", init)
+    b = _section("BlockSize", bsz)
+    return struct.pack(">4I", 16, len(p), len(i), len(b)) + p + i + b
+
+
+def encode_offscreen(rgba: np.ndarray):
+    """Encode an RGBA uint8 array (h, w, 4) as (Attribute, BlockData body).
+
+    Tiles are 256x256, 5 channels (alpha plane, then per-pixel B,G,R,x).
+    Fully transparent tiles are stored as empty records. The layout is
+    the exact inverse of decode_offscreen/parse_blocks above."""
+    h, w = rgba.shape[:2]
+    gw = (w + 255) // 256
+    gh = (h + 255) // 256
+    records = []
+    checksums = []
+    for by in range(gh):
+        for bx in range(gw):
+            idx = by * gw + bx
+            tile = np.zeros((256, 256, 4), np.uint8)
+            src = rgba[by * 256:(by + 1) * 256, bx * 256:(bx + 1) * 256]
+            tile[:src.shape[0], :src.shape[1]] = src
+            head = struct.pack(">IHHII", idx, 5, 0, 256, 256)
+            if not tile.any():
+                rec = (struct.pack(">I", 104) + struct.pack(">I", 19) + BEGIN
+                       + head + struct.pack(">I", 0)
+                       + struct.pack(">I", 17) + END)
+                checksums.append(0)
+            else:
+                alpha = tile[..., 3].tobytes()
+                bgrx = np.dstack([tile[..., 2], tile[..., 1], tile[..., 0],
+                                  np.zeros((256, 256), np.uint8)]).tobytes()
+                z = zlib.compress(alpha + bgrx, 1)
+                inner = len(z)
+                rec = (struct.pack(">I", 112 + inner) + struct.pack(">I", 19)
+                       + BEGIN + head + struct.pack(">I", 1)
+                       + struct.pack(">I", inner + 4)
+                       + struct.pack("<I", inner) + z
+                       + struct.pack(">I", 17) + END)
+                checksums.append(zlib.adler32(struct.pack("<I", inner) + z)
+                                 & 0xFFFFFFFF)
+            records.append(rec)
+    n = gw * gh
+    status = (struct.pack(">I", 11) + STATUS
+              + struct.pack(">3I", 12, n, 4) + struct.pack(f">{n}I", *([1] * n)))
+    csum = (struct.pack(">I", 13) + CHECKSUM
+            + struct.pack(">3I", 12, n, 4)
+            + struct.pack(f">{n}I", *checksums))
+    body = b"".join(records) + status + csum
+    return make_attribute(w, h, [len(r) for r in records]), body
+
+
+def halve(rgba: np.ndarray) -> np.ndarray:
+    """One 2x box-downscale step (premultiplied average over the real
+    pixels of each 2x2 block; edge blocks average fewer pixels).
+    Output size is ceil(h/2) x ceil(w/2)."""
+    h, w = rgba.shape[:2]
+    nh, nw = (h + 1) // 2, (w + 1) // 2
+    f = rgba.astype(np.float64)
+    a = f[..., 3:4] / 255.0
+    prem = np.concatenate([f[..., :3] * a, f[..., 3:4]], axis=2)
+    pad = np.zeros((nh * 2, nw * 2, 4))
+    pad[:h, :w] = prem
+    cnt = np.zeros((nh * 2, nw * 2))
+    cnt[:h, :w] = 1.0
+    sums = pad.reshape(nh, 2, nw, 2, 4).sum(axis=(1, 3))
+    cnts = cnt.reshape(nh, 2, nw, 2).sum(axis=(1, 3))
+    alpha = sums[..., 3] / cnts
+    asum = sums[..., 3:4]
+    rgb = np.where(asum > 0, sums[..., :3] / np.maximum(asum, 1e-12), 0.0)
+    out = np.concatenate([rgb, alpha[..., None]], axis=2)
+    return np.clip(np.rint(out), 0, 255).astype(np.uint8)
