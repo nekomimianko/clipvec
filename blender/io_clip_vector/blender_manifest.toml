@@ -1,0 +1,14 @@
+schema_version = "1.0.0"
+
+id = "io_clip_vector"
+version = "0.1.0"
+name = "CLIP STUDIO PAINT vector (.clip)"
+tagline = "Import/export CLIP STUDIO PAINT vector layers with pen pressure"
+maintainer = "clipvec"
+type = "add-on"
+blender_version_min = "4.3.0"
+license = ["SPDX:MIT"]
+tags = ["Import-Export", "Grease Pencil"]
+
+[permissions]
+files = "Read and write .clip files"
