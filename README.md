@@ -2,7 +2,8 @@
 
 CLIP STUDIO PAINT(以下 CSP)の `.clip` ファイルを直接読み書きし、ベクターレイヤーのストローク(座標・筆圧・傾き・速度・線幅/不透明度の倍率・色・ブラシ・曲線の種類)を欠落なく取り出したり、書き戻したりします。SVG 経由では失われる筆圧も残ります。
 
-* 形式の詳細(ツール開発用リファレンス): [docs/CLIP_FORMAT_SPEC.md](docs/CLIP_FORMAT_SPEC.md)
+**解析した形式仕様: [docs/CLIP_FORMAT_SPEC.md](docs/CLIP_FORMAT_SPEC.md)**
+
 * Python 3.10+ のみ(標準ライブラリだけで動作。`raster.py` だけ numpy を使用)
 
 ## Blender アドオン (Grease Pencil v3, Blender 4.3+ / 5.1 で確認)
@@ -66,6 +67,3 @@ doc.save("out.clip")
 * 速度・ランダムによる線幅の変化は近似です
 * アニメーションのセル(タイムライン)は対象外です。現在のフレームだけを扱います
 
-## 関連プロジェクト
-
-* [line-trace-strokes](https://github.com/nekomimianko/line-trace-strokes) — ラスター線画を可変半径ストロークに変換し、本ライブラリ経由で .clip のベクターレイヤーにする。代表スクリプト `line_to_clip.py` が画像から .clip までを一括で行う（橋渡しの実体は `tools/from_line_trace.py`）。
