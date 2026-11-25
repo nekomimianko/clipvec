@@ -65,3 +65,7 @@ doc.save("out.clip")
 * ブラシの形状・テクスチャ・水彩などの再現はしません(Blender 側は丸い線になります)。ブラシ設定は ID で保持しているので、CSP に戻せば元どおりです
 * 速度・ランダムによる線幅の変化は近似です
 * アニメーションのセル(タイムライン)は対象外です。現在のフレームだけを扱います
+
+## 関連プロジェクト
+
+* [line-trace-strokes](https://github.com/nekomimianko/line-trace-strokes) — ラスター線画を可変半径ストロークに変換し、本ライブラリ経由で .clip のベクターレイヤーにする。代表スクリプト `line_to_clip.py` が画像から .clip までを一括で行う（橋渡しの実体は `tools/from_line_trace.py`）。
